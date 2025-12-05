@@ -1,15 +1,7 @@
 'use strict';
 
-const { randomBytes } = require('crypto');
-
-const projects = new Map();
-
-function getIssuesForProject(project) {
-  if (!projects.has(project)) {
-    projects.set(project, []);
-  }
-  return projects.get(project);
-}
+require('../db-connection');
+const IssueModel = require('../models').Issue;
 
 function normalizeBoolean(value) {
   if (typeof value === 'boolean') {
@@ -30,38 +22,28 @@ module.exports = function (app) {
 
   app.route('/api/issues/:project')
   
-    .get(function (req, res){
+    .get(async function (req, res){
       const project = req.params.project;
-      const issues = getIssuesForProject(project);
-      const filters = req.query || {};
-
-      const filtered = issues.filter(issue => {
-        return Object.entries(filters).every(([key, value]) => {
-          if (value === undefined) {
-            return true;
-          }
-          if (key === 'open') {
-            return issue.open === normalizeBoolean(value);
-          }
-          if (!(key in issue)) {
-            return false;
-          }
-          const issueValue = issue[key];
-          if (issueValue instanceof Date) {
-            const filterDate = new Date(value);
-            if (Number.isNaN(filterDate.getTime())) {
-              return false;
-            }
-            return issueValue.toISOString() === filterDate.toISOString();
-          }
-          return issueValue.toString() === value.toString();
-        });
+      const filters = { projectId: project };
+      Object.entries(req.query || {}).forEach(([key, value]) => {
+        if (value === undefined) {
+          return;
+        }
+        if (key === 'open') {
+          filters.open = normalizeBoolean(value);
+          return;
+        }
+        filters[key] = value;
       });
-
-      return res.json(filtered);
+      try {
+        const issues = await IssueModel.find(filters).lean();
+        return res.json(issues);
+      } catch (err) {
+        return res.json([]);
+      }
     })
     
-    .post(function (req, res){
+    .post(async function (req, res){
       const project = req.params.project;
       const { issue_title, issue_text, created_by } = req.body;
       const assigned_to = req.body.assigned_to || '';
@@ -72,39 +54,31 @@ module.exports = function (app) {
       }
 
       const now = new Date();
-      const issue = {
-        _id: randomBytes(12).toString('hex'),
-        issue_title,
-        issue_text,
-        created_by,
-        assigned_to,
-        status_text,
-        created_on: now,
-        updated_on: now,
-        open: true
-      };
-
-      const issues = getIssuesForProject(project);
-      issues.push(issue);
-
-      return res.json(issue);
+      try {
+        const issue = await IssueModel.create({
+          projectId: project,
+          issue_title,
+          issue_text,
+          created_by,
+          assigned_to,
+          status_text,
+          created_on: now,
+          updated_on: now,
+          open: true
+        });
+        return res.json(issue);
+      } catch (err) {
+        return res.json({ error: 'required field(s) missing' });
+      }
     })
     
-    .put(function (req, res){
+    .put(async function (req, res){
       const project = req.params.project;
       const { _id } = req.body;
 
       if (!_id) {
         return res.json({ error: 'missing _id' });
       }
-
-      const issues = getIssuesForProject(project);
-      const issue = issues.find(item => item._id === _id);
-
-      if (!issue) {
-        return res.json({ error: 'could not update', _id });
-      }
-
       const updates = {};
       Object.entries(req.body).forEach(([key, value]) => {
         if (key === '_id' || value === undefined || value === '') {
@@ -117,13 +91,24 @@ module.exports = function (app) {
         return res.json({ error: 'no update field(s) sent', _id });
       }
 
-      Object.assign(issue, updates);
-      issue.updated_on = new Date();
+      updates.updated_on = new Date();
 
-      return res.json({ result: 'successfully updated', _id });
+      try {
+        const result = await IssueModel.findOneAndUpdate(
+          { _id, projectId: project },
+          updates,
+          { new: true }
+        );
+        if (!result) {
+          return res.json({ error: 'could not update', _id });
+        }
+        return res.json({ result: 'successfully updated', _id });
+      } catch (err) {
+        return res.json({ error: 'could not update', _id });
+      }
     })
     
-    .delete(function (req, res){
+    .delete(async function (req, res){
       const project = req.params.project;
       const { _id } = req.body;
 
@@ -131,15 +116,15 @@ module.exports = function (app) {
         return res.json({ error: 'missing _id' });
       }
 
-      const issues = getIssuesForProject(project);
-      const index = issues.findIndex(item => item._id === _id);
-
-      if (index === -1) {
+      try {
+        const result = await IssueModel.findOneAndDelete({ _id, projectId: project });
+        if (!result) {
+          return res.json({ error: 'could not delete', _id });
+        }
+        return res.json({ result: 'successfully deleted', _id });
+      } catch (err) {
         return res.json({ error: 'could not delete', _id });
       }
-
-      issues.splice(index, 1);
-      return res.json({ result: 'successfully deleted', _id });
     });
     
 };
